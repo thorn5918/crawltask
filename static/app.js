@@ -940,8 +940,9 @@ async function renderEnvs(root) {
         return;
       }
       $('#env-grid').innerHTML = envs.map(e => {
-        const src = e.source === 'download'
-          ? '<span class="badge info">在线下载</span>' : '<span class="badge gray">本机解释器</span>';
+        const src = e.source === 'official' ? '<span class="badge info">官方安装包</span>'
+          : e.source === 'download' ? '<span class="badge info">在线下载</span>'
+          : '<span class="badge gray">本机解释器</span>';
         let st;
         if (e.status === 'creating') st = `<span class="badge running">创建中${e.busy ? '…' : ''}</span>`;
         else if (e.status === 'ready') st = '<span class="badge success">就绪</span>';
@@ -1009,10 +1010,17 @@ async function openEnvDialog(onCreated) {
         <button class="btn sm" id="ev-refresh-interp">重新发现</button>
       </div>
       <div id="ev-download-box" style="display:none">
-        <div class="form-item"><label>Python 版本（python-build-standalone）</label>
+        <div class="form-item"><label>下载来源</label>
+          <select id="ev-dl-src">
+            <option value="official">官方安装包 · 国内镜像直连（推荐，无需加速）</option>
+            <option value="pbs">python-build-standalone · GitHub</option>
+          </select>
+          <div class="form-hint" id="ev-dl-hint"></div></div>
+        <div class="form-item"><label>Python 版本</label>
           <select id="ev-version"><option value="">获取中…</option></select>
-          <div class="form-hint" id="ev-ver-hint">在线下载依赖 GitHub 连通性；下载的运行时保留在 pythons/ 可复用</div></div>
-        <div class="form-item"><label>下载加速前缀（GitHub 不可达时使用，保存后全局生效）</label>
+          <div class="form-hint" id="ev-ver-hint"></div></div>
+        <div class="form-item" id="ev-mirror-box">
+          <label>下载加速前缀（GitHub 不可达时使用，保存后全局生效）</label>
           <select id="ev-mirror">
             <option value="">直连 GitHub</option>
             <option value="https://ghfast.top">ghfast.top（公共加速）</option>
@@ -1042,14 +1050,26 @@ async function openEnvDialog(onCreated) {
   }
   loadInterps();
 
+  function isOfficial() { return $('#ev-dl-src', m.el).value === 'official'; }
+
+  function syncDlUI() {
+    const official = isOfficial();
+    $('#ev-mirror-box', m.el).style.display = official ? 'none' : '';
+    $('#ev-dl-hint', m.el).textContent = official
+      ? 'python.org 官方安装包，从华为云/中科大/npmmirror 依次尝试，无需加速'
+      : 'python-build-standalone 绿色包，需可访问 GitHub（可配加速前缀）';
+  }
+
   async function loadVersions() {
     const sel = $('#ev-version', m.el);
+    sel.innerHTML = '<option value="">获取中…</option>';
     try {
-      const d = await api('GET', '/api/python-versions');
+      const d = await api('GET', isOfficial() ? '/api/official-versions' : '/api/python-versions');
       const list = d.versions || [];
       sel.innerHTML = list.map(v => `<option value="${v}">Python ${v}</option>`).join('');
-      $('#ev-ver-hint', m.el).textContent = (d.source === 'github' ? '（列表来自 GitHub 最新发布）' : '（离线兜底列表）') +
-        ' · 在线下载依赖 GitHub 连通性；运行时保留在 pythons/ 可复用';
+      $('#ev-ver-hint', m.el).textContent = (isOfficial()
+        ? (d.source === 'mirror' ? '（列表来自华为云镜像目录）' : '（离线兜底列表）') + ' · 官方运行时保留在 pythons/ 可复用'
+        : (d.source === 'github' ? '（列表来自 GitHub 最新发布）' : '（离线兜底列表）') + ' · 在线下载依赖 GitHub 连通性；运行时保留在 pythons/ 可复用');
     } catch (e) {
       sel.innerHTML = '<option value="">获取失败</option>';
     }
@@ -1085,8 +1105,9 @@ async function openEnvDialog(onCreated) {
     const v = m.el.querySelector('input[name=ev-src]:checked').value;
     $('#ev-local-box', m.el).style.display = v === 'local' ? '' : 'none';
     $('#ev-download-box', m.el).style.display = v === 'download' ? '' : 'none';
-    if (v === 'download') { loadVersions(); loadMirror(); }
+    if (v === 'download') { syncDlUI(); loadVersions(); loadMirror(); }
   });
+  $('#ev-dl-src', m.el).onchange = () => { syncDlUI(); loadVersions(); };
   $('#ev-mirror', m.el).onchange = () => { syncMirrorInput(); saveMirror(); };
   $('#ev-mirror-custom', m.el).onblur = saveMirror;
   $('#ev-refresh-interp', m.el).onclick = loadInterps;
@@ -1108,7 +1129,7 @@ async function openEnvDialog(onCreated) {
       } else {
         const version = $('#ev-version', m.el).value;
         if (!version) { toast('请选择 Python 版本', 'warning'); return; }
-        body = { name, source, version };
+        body = { name, source: isOfficial() ? 'official' : source, version };
       }
       const d = await api('POST', '/api/envs', body);
       toast('开始创建，可点击「日志」查看进度', 'success');

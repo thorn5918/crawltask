@@ -12,7 +12,7 @@ type Env struct {
 	PythonVersion string `json:"python_version"`
 	Interpreter   string `json:"interpreter"`
 	ScriptsDir    string `json:"scripts_dir"`
-	Source        string `json:"source"` // local | download
+	Source        string `json:"source"` // local | download | official
 	Status        string `json:"status"` // creating | ready | error
 	CreatedAt     string `json:"created_at"`
 }

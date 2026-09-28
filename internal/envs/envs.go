@@ -214,6 +214,46 @@ func (m *Manager) CreateDownload(name, version string) (*store.Env, error) {
 	return m.st.GetEnv(id)
 }
 
+// CreateOfficial 下载 python.org 官方安装包（国内镜像直连）并静默安装、创建虚拟环境（异步，仅 Windows）。
+func (m *Manager) CreateOfficial(name, version string) (*store.Env, error) {
+	name = strings.TrimSpace(name)
+	if !envNameRe.MatchString(name) {
+		return nil, fmt.Errorf("环境名不合法（1-64 位字母数字下划线点横线）")
+	}
+	if !versionRe.MatchString(version) {
+		return nil, fmt.Errorf("Python 版本号不合法：%s", version)
+	}
+	if runtime.GOOS != "windows" {
+		return nil, fmt.Errorf("官方安装包方式仅支持 Windows（Linux/macOS 请用 python-build-standalone 或本机解释器）")
+	}
+	if _, err := m.st.GetEnvByName(name); err == nil {
+		return nil, fmt.Errorf("环境名已存在：%s", name)
+	}
+	if _, err := os.Stat(filepath.Join(config.VenvsDir, name)); err == nil {
+		return nil, fmt.Errorf("venvs 目录下已有同名文件夹")
+	}
+	id, err := m.st.CreateEnv(&store.Env{Name: name, PythonVersion: version, Source: "official", Status: "creating"})
+	if err != nil {
+		return nil, err
+	}
+	go func() {
+		m.setBusy(id, true)
+		defer m.setBusy(id, false)
+		logPath := EnvLogPath(id)
+		resetLog(logPath)
+		logf := func(line string) { appendLog(logPath, line) }
+		logf("准备 Python " + version + "（python.org 官方安装包 · 国内镜像直连）")
+		exe, err := m.ensureOfficialRuntime(version, logf)
+		if err != nil {
+			logf("运行时准备失败：" + err.Error())
+			_ = m.st.SetEnvStatus(id, "error")
+			return
+		}
+		m.createVenv(id, exe, name, version, logf)
+	}()
+	return m.st.GetEnv(id)
+}
+
 // createVenv 由指定解释器创建 venv 并回写数据库（由调用方管理 busy 与日志）。
 func (m *Manager) createVenv(id int64, interpreter, name, version string, logf func(string)) {
 	venv := filepath.Join(config.VenvsDir, name)
@@ -364,6 +404,132 @@ func (m *Manager) SetDownloadMirror(prefix string) error {
 		return fmt.Errorf("加速前缀需以 http:// 或 https:// 开头")
 	}
 	return m.st.SetSetting("pb_mirror", prefix)
+}
+
+// ---------- python.org 官方安装包（国内镜像直连，仅 Windows） ----------
+
+// officialMirrors python.org 官方安装包镜像站（下载时依次尝试，全部失败才报错）。
+var officialMirrors = []string{
+	"https://mirrors.huaweicloud.com",   // 华为云（官方文档推荐）
+	"https://repo.huaweicloud.com",      // 华为云备用域名（同源）
+	"https://mirrors.ustc.edu.cn",       // 中科大
+	"https://cdn.npmmirror.com/binaries", // npmmirror（淘宝二进制镜像）
+}
+
+func officialRuntimeDir(version string) string {
+	return filepath.Join(config.PythonsDir, "official-"+version)
+}
+
+// ensureOfficialRuntime 下载官方安装包（国内镜像）并静默安装到 pythons/official-<版本>/。
+func (m *Manager) ensureOfficialRuntime(version string, logf func(string)) (string, error) {
+	runtimeDir := officialRuntimeDir(version)
+	exe := filepath.Join(runtimeDir, "python.exe")
+	if _, err := os.Stat(exe); err == nil {
+		logf("检测到已有官方运行时，直接复用：" + exe)
+		return exe, nil
+	}
+	_ = os.MkdirAll(runtimeDir, 0o755)
+
+	// 候选文件名：arm64 优先，回退 amd64（Windows ARM64 可模拟运行 x64）
+	names := []string{fmt.Sprintf("python-%s-amd64.exe", version)}
+	if runtime.GOARCH == "arm64" {
+		names = []string{fmt.Sprintf("python-%s-arm64.exe", version), names[0]}
+	}
+	tmp := filepath.Join(config.PythonsDir, ".download-official-"+version+".exe")
+	client := &http.Client{Timeout: 30 * time.Minute}
+	var lastErr error
+outer:
+	for _, fname := range names {
+		for i, mirror := range officialMirrors {
+			url := mirror + "/python/" + version + "/" + fname
+			logf(fmt.Sprintf("尝试镜像（%d/%d）：%s", i+1, len(officialMirrors), mirror))
+			resp, err := client.Get(url)
+			if err != nil {
+				lastErr = fmt.Errorf("镜像不可达：%w", err)
+				continue
+			}
+			if resp.StatusCode == http.StatusNotFound {
+				resp.Body.Close()
+				lastErr = fmt.Errorf("镜像中不存在 %s", fname)
+				continue
+			}
+			if resp.StatusCode != http.StatusOK {
+				resp.Body.Close()
+				lastErr = fmt.Errorf("HTTP %d", resp.StatusCode)
+				continue
+			}
+			logf("下载地址：" + url)
+			out, err := os.Create(tmp)
+			if err != nil {
+				resp.Body.Close()
+				return "", err
+			}
+			pw := &progressWriter{total: resp.ContentLength, logf: logf, last: time.Now()}
+			_, err = io.Copy(out, io.TeeReader(resp.Body, pw))
+			out.Close()
+			resp.Body.Close()
+			if err != nil {
+				os.Remove(tmp)
+				lastErr = fmt.Errorf("下载中断：%w", err)
+				continue
+			}
+			logf("下载完成（" + humanBytes(pw.read) + "），开始静默安装 → " + runtimeDir)
+			break outer
+		}
+	}
+	if _, err := os.Stat(tmp); err != nil {
+		return "", fmt.Errorf("全部镜像下载失败，最后一个错误：%v", lastErr)
+	}
+	defer os.Remove(tmp)
+
+	// 静默安装（python.org exe 标准参数，per-user，装到指定目录，不写 PATH/快捷方式）
+	cmd := exec.Command(tmp, "/quiet",
+		"InstallAllUsers=0",
+		"TargetDir="+runtimeDir,
+		"Include_pip=1", "Include_test=0", "Include_doc=0",
+		"Include_launcher=0", "InstallLauncherAllUsers=0",
+		"PrependPath=0", "Shortcuts=0", "AssociateFiles=0",
+	)
+	if err := cmd.Run(); err != nil {
+		if ee, ok := err.(*exec.ExitError); !ok || ee.ExitCode() != 3010 {
+			return "", fmt.Errorf("静默安装失败：%w", err)
+		}
+	}
+	if _, err := os.Stat(exe); err != nil {
+		return "", fmt.Errorf("安装结束但未找到解释器：%s", exe)
+	}
+	logf("官方运行时就绪：" + exe + "（保留在 pythons/ 下，可复用）")
+	return exe, nil
+}
+
+// FetchOfficialVersions 从华为云镜像解析官方可用版本（取最近的若干个），失败时返回内置兜底。
+func FetchOfficialVersions() ([]string, string) {
+	client := &http.Client{Timeout: 6 * time.Second}
+	resp, err := client.Get("https://mirrors.huaweicloud.com/python/")
+	if err == nil {
+		defer resp.Body.Close()
+		if resp.StatusCode == http.StatusOK {
+			b, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+			re := regexp.MustCompile(`href="?(\d+\.\d+\.\d+)/"?`)
+			seen := map[string]bool{}
+			var list []string
+			for _, mm := range re.FindAllStringSubmatch(string(b), -1) {
+				v := mm[1]
+				if strings.HasPrefix(v, "3.") && !seen[v] {
+					seen[v] = true
+					list = append(list, v)
+				}
+			}
+			sort.Slice(list, func(i, j int) bool { return versionLess(list[i], list[j]) })
+			if len(list) > 15 {
+				list = list[len(list)-15:]
+			}
+			if len(list) > 0 {
+				return list, "mirror"
+			}
+		}
+	}
+	return append([]string(nil), BuiltinVersions...), "builtin"
 }
 
 type progressWriter struct {
