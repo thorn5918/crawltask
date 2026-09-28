@@ -67,10 +67,8 @@ func (s *Server) createEnv(w http.ResponseWriter, r *http.Request) {
 		env, err = s.envm.CreateLocal(p.Name, p.Interpreter)
 	case "download":
 		env, err = s.envm.CreateDownload(p.Name, p.Version)
-	case "official":
-		env, err = s.envm.CreateOfficial(p.Name, p.Version)
 	default:
-		err = errors.New("source 需为 local、download 或 official")
+		err = errors.New("source 需为 local 或 download")
 	}
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
@@ -187,12 +185,6 @@ func (s *Server) envUninstall(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) pythonVersions(w http.ResponseWriter, r *http.Request) {
 	versions, source := s.envm.FetchVersions()
-	writeJSON(w, http.StatusOK, map[string]any{"versions": versions, "source": source})
-}
-
-// officialVersions python.org 官方安装包可用版本（来自国内镜像目录）。
-func (s *Server) officialVersions(w http.ResponseWriter, r *http.Request) {
-	versions, source := envs.FetchOfficialVersions()
 	writeJSON(w, http.StatusOK, map[string]any{"versions": versions, "source": source})
 }
 
