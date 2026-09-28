@@ -274,11 +274,13 @@ func platformID() string {
 	}
 }
 
+// runtimePythonExe 运行时解释器路径。extractTarGz 会剥掉 tarball 顶层的 python/
+// 目录，因此运行时内容直接位于 runtimeDir 下（Windows: python.exe；Unix: bin/python3）。
 func runtimePythonExe(runtimeDir string) string {
 	if runtime.GOOS == "windows" {
-		return filepath.Join(runtimeDir, "python", "python.exe")
+		return filepath.Join(runtimeDir, "python.exe")
 	}
-	return filepath.Join(runtimeDir, "python", "bin", "python3")
+	return filepath.Join(runtimeDir, "bin", "python3")
 }
 
 // ensureRuntime 确保指定版本的运行时存在（已存在则复用），返回解释器路径。
