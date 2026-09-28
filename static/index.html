@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PyScheduler · Python 定时任务管理平台</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div id="app">
+  <aside id="sidebar">
+    <div class="logo">
+      <div class="logo-mark">Py</div>
+      <div class="logo-text">
+        <div class="logo-name">PyScheduler</div>
+        <div class="logo-sub">Go 单文件版</div>
+      </div>
+    </div>
+    <nav id="nav">
+      <a href="#/dashboard" data-page="dashboard"><span class="nav-ico">◧</span>仪表盘</a>
+      <a href="#/tasks" data-page="tasks"><span class="nav-ico">◷</span>任务管理</a>
+      <a href="#/projects" data-page="projects"><span class="nav-ico">▤</span>项目管理</a>
+      <a href="#/envs" data-page="envs"><span class="nav-ico">◍</span>环境管理</a>
+      <a href="#/logs" data-page="logs"><span class="nav-ico">☰</span>运行日志</a>
+      <a href="#/settings" data-page="settings"><span class="nav-ico">⚙</span>通知设置</a>
+    </nav>
+    <div class="sidebar-foot">
+      <div id="running-indicator" class="running-indicator" title="运行中的任务实例数"></div>
+      <div class="ver">v1.0 · 无需 Node 构建</div>
+    </div>
+  </aside>
+  <main id="main">
+    <header id="topbar"><h1 id="page-title">仪表盘</h1></header>
+    <div id="page"></div>
+  </main>
+</div>
+<div id="toasts"></div>
+<div id="modal-root"></div>
+<script src="/app.js"></script>
+</body>
+</html>
