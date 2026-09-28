@@ -40,7 +40,7 @@ func main() {
 		log.Fatalf("初始化数据目录失败: %v", err)
 	}
 
-	host := getenv("HOST", "127.0.0.1")
+	host := getenv("HOST", "0.0.0.0")
 	port := getenv("PORT", "8300")
 
 	st, err := store.Open(filepath.Join(config.DataDir, "scheduler.db"))
