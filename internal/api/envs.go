@@ -199,3 +199,24 @@ func (s *Server) interpreters(w http.ResponseWriter, r *http.Request) {
 func (s *Server) mirrors(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"mirrors": config.Mirrors})
 }
+
+// getDownloadMirror 返回 Python 运行时下载加速前缀（空 = 直连 GitHub）。
+func (s *Server) getDownloadMirror(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"mirror": s.envm.DownloadMirror()})
+}
+
+// saveDownloadMirror 保存下载加速前缀（ghproxy 形式；空串表示直连）。
+func (s *Server) saveDownloadMirror(w http.ResponseWriter, r *http.Request) {
+	var p struct {
+		Mirror string `json:"mirror"`
+	}
+	if err := readJSON(r, &p); err != nil {
+		writeErr(w, http.StatusBadRequest, "请求体解析失败："+err.Error())
+		return
+	}
+	if err := s.envm.SetDownloadMirror(p.Mirror); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "mirror": s.envm.DownloadMirror()})
+}

@@ -60,6 +60,8 @@ func (s *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("GET /api/python-versions", s.pythonVersions)
 	mux.HandleFunc("GET /api/interpreters", s.interpreters)
 	mux.HandleFunc("GET /api/mirrors", s.mirrors)
+	mux.HandleFunc("GET /api/download-mirror", s.getDownloadMirror)
+	mux.HandleFunc("POST /api/download-mirror", s.saveDownloadMirror)
 
 	// 项目
 	mux.HandleFunc("GET /api/projects", s.listProjects)

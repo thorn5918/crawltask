@@ -297,7 +297,7 @@ func (m *Manager) ensureRuntime(version string, logf func(string)) (string, erro
 	client := &http.Client{Timeout: 30 * time.Minute}
 	resp, err := client.Get(url)
 	if err != nil {
-		return "", fmt.Errorf("下载失败（需可访问 GitHub）：%w", err)
+		return "", fmt.Errorf("下载失败：%w（GitHub 不可达时，可在「创建环境」弹窗中配置下载加速前缀）", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
@@ -334,15 +334,34 @@ func (m *Manager) ensureRuntime(version string, logf func(string)) (string, erro
 }
 
 // downloadURL 取版本下载地址：优先用 GitHub API 发现的最新地址，否则用内置 tag 构造。
+// 配置了加速前缀时按 ghproxy 形式拼接：前缀 + "/" + GitHub 原始地址。
 func (m *Manager) downloadURL(version string) string {
 	m.mu.Lock()
-	if u, ok := m.urls[version]; ok {
-		m.mu.Unlock()
-		return u
-	}
+	u, ok := m.urls[version]
 	m.mu.Unlock()
-	return fmt.Sprintf("https://github.com/astral-sh/python-build-standalone/releases/download/%s/cpython-%s+%s-%s-install_only.tar.gz",
-		pbsTag, version, pbsTag, platformID())
+	if !ok {
+		u = fmt.Sprintf("https://github.com/astral-sh/python-build-standalone/releases/download/%s/cpython-%s+%s-%s-install_only.tar.gz",
+			pbsTag, version, pbsTag, platformID())
+	}
+	if p := m.DownloadMirror(); p != "" {
+		return p + "/" + u
+	}
+	return u
+}
+
+// DownloadMirror 读取 GitHub 下载加速前缀（空串 = 直连）。
+func (m *Manager) DownloadMirror() string {
+	v, _ := m.st.GetSetting("pb_mirror")
+	return strings.TrimRight(strings.TrimSpace(v), "/")
+}
+
+// SetDownloadMirror 设置下载加速前缀（ghproxy 形式，如 https://ghfast.top）；空串表示直连 GitHub。
+func (m *Manager) SetDownloadMirror(prefix string) error {
+	prefix = strings.TrimRight(strings.TrimSpace(prefix), "/")
+	if prefix != "" && !strings.HasPrefix(prefix, "http://") && !strings.HasPrefix(prefix, "https://") {
+		return fmt.Errorf("加速前缀需以 http:// 或 https:// 开头")
+	}
+	return m.st.SetSetting("pb_mirror", prefix)
 }
 
 type progressWriter struct {

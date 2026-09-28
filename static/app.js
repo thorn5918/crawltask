@@ -1012,6 +1012,16 @@ async function openEnvDialog(onCreated) {
         <div class="form-item"><label>Python 版本（python-build-standalone）</label>
           <select id="ev-version"><option value="">获取中…</option></select>
           <div class="form-hint" id="ev-ver-hint">在线下载依赖 GitHub 连通性；下载的运行时保留在 pythons/ 可复用</div></div>
+        <div class="form-item"><label>下载加速前缀（GitHub 不可达时使用，保存后全局生效）</label>
+          <select id="ev-mirror">
+            <option value="">直连 GitHub</option>
+            <option value="https://ghfast.top">ghfast.top（公共加速）</option>
+            <option value="https://gh.llkk.cc">gh.llkk.cc（公共加速）</option>
+            <option value="https://ghproxy.net">ghproxy.net（公共加速）</option>
+            <option value="__custom">自定义…</option>
+          </select>
+          <input type="text" id="ev-mirror-custom" placeholder="自定义加速前缀，如 https://your-proxy.example.com" style="display:none">
+          <div class="form-hint">阿里源/清华源仅镜像 pip 包，不能用于运行时下载；加速前缀需为 ghproxy 形式（前缀 + GitHub 原始地址），公共加速可能失效</div></div>
       </div>`,
   });
 
@@ -1045,12 +1055,40 @@ async function openEnvDialog(onCreated) {
     }
   }
 
+  function syncMirrorInput() {
+    $('#ev-mirror-custom', m.el).style.display = $('#ev-mirror', m.el).value === '__custom' ? '' : 'none';
+  }
+
+  async function loadMirror() {
+    try {
+      const d = await api('GET', '/api/download-mirror');
+      const cur = d.mirror || '';
+      const sel = $('#ev-mirror', m.el);
+      const known = [...sel.options].some(o => o.value === cur);
+      sel.value = known ? cur : '__custom';
+      if (!known && cur) $('#ev-mirror-custom', m.el).value = cur;
+      syncMirrorInput();
+    } catch (e) { /* ignore */ }
+  }
+
+  async function saveMirror() {
+    const sel = $('#ev-mirror', m.el);
+    let val = sel.value === '__custom' ? $('#ev-mirror-custom', m.el).value.trim() : sel.value;
+    val = val.replace(/\/+$/, '');
+    try {
+      await api('POST', '/api/download-mirror', { mirror: val });
+      toast('下载加速设置已保存', 'success');
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
   $$('input[name=ev-src]', m.el).forEach(r => r.onchange = () => {
     const v = m.el.querySelector('input[name=ev-src]:checked').value;
     $('#ev-local-box', m.el).style.display = v === 'local' ? '' : 'none';
     $('#ev-download-box', m.el).style.display = v === 'download' ? '' : 'none';
-    if (v === 'download') loadVersions();
+    if (v === 'download') { loadVersions(); loadMirror(); }
   });
+  $('#ev-mirror', m.el).onchange = () => { syncMirrorInput(); saveMirror(); };
+  $('#ev-mirror-custom', m.el).onblur = saveMirror;
   $('#ev-refresh-interp', m.el).onclick = loadInterps;
 
   const cancel = document.createElement('button'); cancel.className = 'btn'; cancel.textContent = '取消';
