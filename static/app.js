@@ -526,8 +526,19 @@ async function openTaskHistory(task) {
           <td>#${r.id}</td><td>${statusBadge(r.status)}</td><td>${triggerText(r.trigger)}</td>
           <td class="nowrap">${esc(r.start_time)}</td><td>${fmtDur(r.duration_ms)}</td>
           <td>${r.exit_code == null ? '-' : r.exit_code}</td>
-          <td><button class="btn sm">日志</button></td>`;
+          <td><button class="btn sm">日志</button> <button class="btn sm danger" data-del="${r.id}" ${r.status === 'running' ? 'disabled' : ''}>删除</button></td>`;
         tr.onclick = () => showRunLog(r.id);
+        tr.querySelector('[data-del]').onclick = async (ev) => {
+          ev.stopPropagation();
+          if (!await confirmDialog(`确认删除运行 #${r.id} 的记录及日志文件？`, '删除记录')) return;
+          try {
+            await api('DELETE', `/api/runs/${r.id}`);
+            toast('已删除', 'success');
+            tr.remove();
+            total--;
+            $('#hist-total', m.el).textContent = `共 ${total} 条`;
+          } catch (e) { toast(e.message, 'error'); }
+        };
         $('#hist-body', m.el).appendChild(tr);
       });
       if (page === 1 && !((d.items || []).length)) $('#hist-body', m.el).innerHTML = '<tr><td colspan="7" class="tbl-empty">暂无记录</td></tr>';
@@ -1249,6 +1260,7 @@ async function renderLogs(root) {
         <input type="date" id="lg-to" title="结束日期">
         <button class="btn primary" id="lg-query">查询</button>
         <button class="btn" id="lg-reset">重置</button>
+        <button class="btn danger" id="lg-clean">删除筛选结果</button>
         <span class="spacer"></span>
         <span class="muted" id="lg-total"></span>
       </div>
@@ -1272,13 +1284,17 @@ async function renderLogs(root) {
 
   let page = 1;
 
-  async function load() {
+  function filterQuery() {
     const q = new URLSearchParams();
-    const taskID = $('#lg-task').value;
-    if (taskID) q.set('task_id', taskID);
+    if ($('#lg-task').value) q.set('task_id', $('#lg-task').value);
     if ($('#lg-status').value) q.set('status', $('#lg-status').value);
     if ($('#lg-from').value) q.set('date_from', $('#lg-from').value);
     if ($('#lg-to').value) q.set('date_to', $('#lg-to').value);
+    return q;
+  }
+
+  async function load() {
+    const q = filterQuery();
     q.set('page', page);
     q.set('page_size', 20);
     try {
@@ -1293,8 +1309,18 @@ async function renderLogs(root) {
           <td>#${r.id}</td><td>${esc(r.task_name)}</td><td>${statusBadge(r.status)}</td>
           <td>${triggerText(r.trigger)}</td><td class="nowrap">${esc(r.start_time)}</td>
           <td>${fmtDur(r.duration_ms)}</td><td>${r.exit_code == null ? '-' : r.exit_code}</td>
-          <td><button class="btn sm">日志</button></td></tr>`).join('');
+          <td><button class="btn sm">日志</button> <button class="btn sm danger" data-del="${r.id}" ${r.status === 'running' ? 'disabled' : ''}>删除</button></td></tr>`).join('');
         $$('#lg-body tr[data-rid]').forEach(tr => tr.onclick = () => showRunLog(+tr.dataset.rid));
+        $$('#lg-body button[data-del]').forEach(b => b.onclick = async (ev) => {
+          ev.stopPropagation();
+          const rid = +b.dataset.del;
+          if (!await confirmDialog(`确认删除运行 #${rid} 的记录及日志文件？`, '删除记录')) return;
+          try {
+            await api('DELETE', `/api/runs/${rid}`);
+            toast('已删除', 'success');
+            load();
+          } catch (e) { toast(e.message, 'error'); }
+        });
       }
       $('#lg-prev').disabled = page <= 1;
       $('#lg-next').disabled = page * 20 >= d.total;
@@ -1304,6 +1330,14 @@ async function renderLogs(root) {
   }
 
   $('#lg-query').onclick = () => { page = 1; load(); };
+  $('#lg-clean').onclick = async () => {
+    if (!await confirmDialog('确认删除当前筛选出的全部记录及日志文件？（运行中的不会被删除）', '批量删除')) return;
+    try {
+      const d = await api('POST', '/api/runs/cleanup?' + filterQuery().toString());
+      toast(`已删除 ${d.deleted} 条`, 'success');
+      page = 1; load();
+    } catch (e) { toast(e.message, 'error'); }
+  };
   $('#lg-reset').onclick = () => {
     $('#lg-task').value = ''; $('#lg-status').value = '';
     $('#lg-from').value = ''; $('#lg-to').value = '';

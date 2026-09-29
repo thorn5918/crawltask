@@ -47,6 +47,8 @@ func (s *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("GET /api/runs", s.listRuns)
 	mux.HandleFunc("GET /api/runs/{id}", s.getRun)
 	mux.HandleFunc("GET /api/runs/{id}/log", s.runLog)
+	mux.HandleFunc("DELETE /api/runs/{id}", s.deleteRun)
+	mux.HandleFunc("POST /api/runs/cleanup", s.cleanupRuns)
 
 	// 环境
 	mux.HandleFunc("GET /api/envs", s.listEnvs)

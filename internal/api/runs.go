@@ -92,3 +92,45 @@ func readLogFrom(path string, offset int64) (string, int64) {
 	}
 	return string(b), st.Size()
 }
+
+// deleteRun 删除单条运行记录（含日志文件）；运行中的返回 409。
+func (s *Server) deleteRun(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathInt64(r, "id")
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "运行 id 不合法")
+		return
+	}
+	logFile, err := s.st.DeleteRun(id)
+	if err != nil {
+		if err.Error() == "运行中的记录不允许删除" {
+			writeErr(w, http.StatusConflict, err.Error())
+			return
+		}
+		writeStoreErr(w, err)
+		return
+	}
+	if logFile != "" {
+		_ = os.Remove(logFile)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// cleanupRuns 按筛选条件批量删除运行记录（排除运行中的），并清理对应日志文件。
+func (s *Server) cleanupRuns(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	n, logs, err := s.st.DeleteRunsBy(store.RunFilter{
+		TaskID:   queryInt64(r, "task_id", 0),
+		Status:   q.Get("status"),
+		DateFrom: q.Get("date_from"),
+		DateTo:   q.Get("date_to"),
+		Keyword:  q.Get("keyword"),
+	})
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	for _, lf := range logs {
+		_ = os.Remove(lf)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"deleted": n})
+}

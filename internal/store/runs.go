@@ -176,3 +176,80 @@ func (s *Store) RunningRuns() ([]*Run, error) {
 	}
 	return out, rows.Err()
 }
+
+// DeleteRun 删除单条运行记录（运行中的不允许），返回其日志文件路径（可能为空）。
+func (s *Store) DeleteRun(id int64) (string, error) {
+	var status, logFile string
+	err := s.db.QueryRow(`SELECT status, log_file FROM runs WHERE id=?`, id).Scan(&status, &logFile)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	if err != nil {
+		return "", err
+	}
+	if status == "running" {
+		return "", errors.New("运行中的记录不允许删除")
+	}
+	if _, err := s.db.Exec(`DELETE FROM runs WHERE id=?`, id); err != nil {
+		return "", err
+	}
+	return logFile, nil
+}
+
+// DeleteRunsBy 按筛选条件批量删除（自动排除运行中的记录），返回删除数量与被删记录的日志路径。
+func (s *Store) DeleteRunsBy(f RunFilter) (int64, []string, error) {
+	if f.Status == "running" {
+		return 0, nil, nil
+	}
+	where := []string{"status != 'running'"}
+	var args []any
+	if f.TaskID > 0 {
+		where = append(where, "task_id=?")
+		args = append(args, f.TaskID)
+	}
+	if f.Status != "" {
+		where = append(where, "status=?")
+		args = append(args, f.Status)
+	}
+	if f.DateFrom != "" {
+		where = append(where, "start_time >= ?")
+		args = append(args, f.DateFrom+" 00:00:00")
+	}
+	if f.DateTo != "" {
+		where = append(where, "start_time <= ?")
+		args = append(args, f.DateTo+" 23:59:59")
+	}
+	if f.Keyword != "" {
+		where = append(where, "task_name LIKE ?")
+		args = append(args, "%"+f.Keyword+"%")
+	}
+	cond := " WHERE " + strings.Join(where, " AND ")
+
+	rows, err := s.db.Query(`SELECT log_file FROM runs`+cond, args...)
+	if err != nil {
+		return 0, nil, err
+	}
+	var logs []string
+	for rows.Next() {
+		var lf string
+		if err := rows.Scan(&lf); err != nil {
+			rows.Close()
+			return 0, nil, err
+		}
+		if lf != "" {
+			logs = append(logs, lf)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, nil, err
+	}
+	rows.Close()
+
+	res, err := s.db.Exec(`DELETE FROM runs`+cond, args...)
+	if err != nil {
+		return 0, nil, err
+	}
+	n, _ := res.RowsAffected()
+	return n, logs, nil
+}
