@@ -274,20 +274,42 @@ func platformID() string {
 	}
 }
 
-// runtimePythonExe 运行时解释器路径。extractTarGz 会剥掉 tarball 顶层的 python/
-// 目录，因此运行时内容直接位于 runtimeDir 下（Windows: python.exe；Unix: bin/python3）。
-func runtimePythonExe(runtimeDir string) string {
+// findRuntimePython 在运行时目录中探测解释器，兼容不同 tarball 布局
+// （extractTarGz 已剥离顶层目录，正常为 Windows: python.exe；Unix: bin/python3；
+// 这里再枚举常见候选路径兜底，包括带版本号的形态如 bin/python3.12）。找不到返回空串。
+func findRuntimePython(runtimeDir, version string) string {
+	var candidates []string
 	if runtime.GOOS == "windows" {
-		return filepath.Join(runtimeDir, "python.exe")
+		candidates = []string{"python.exe", `bin\python.exe`, `python\python.exe`}
+	} else {
+		candidates = []string{"bin/python3", "bin/python", "python3", "python/bin/python3"}
+		// 带版本号的形态（如 bin/python3.12）：Unix 包里真实二进制常以此命名
+		if parts := strings.SplitN(version, ".", 3); len(parts) >= 2 {
+			candidates = append(candidates, "bin/python"+parts[0]+"."+parts[1], "python"+parts[0]+"."+parts[1])
+		}
 	}
-	return filepath.Join(runtimeDir, "bin", "python3")
+	for _, c := range candidates {
+		p := filepath.Join(runtimeDir, c)
+		if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
+			return p
+		}
+	}
+	// 最终兜底：扫描 bin/python3*（覆盖 python3.13.1 之类的任意命名）
+	if runtime.GOOS != "windows" {
+		ms, _ := filepath.Glob(filepath.Join(runtimeDir, "bin", "python3*"))
+		for _, p := range ms {
+			if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
+				return p
+			}
+		}
+	}
+	return ""
 }
 
 // ensureRuntime 确保指定版本的运行时存在（已存在则复用），返回解释器路径。
 func (m *Manager) ensureRuntime(version string, logf func(string)) (string, error) {
 	runtimeDir := filepath.Join(config.PythonsDir, "cpython-"+version)
-	exe := runtimePythonExe(runtimeDir)
-	if _, err := os.Stat(exe); err == nil {
+	if exe := findRuntimePython(runtimeDir, version); exe != "" {
 		logf("检测到已有运行时，直接复用：" + exe)
 		return exe, nil
 	}
@@ -328,8 +350,19 @@ func (m *Manager) ensureRuntime(version string, logf func(string)) (string, erro
 		return "", fmt.Errorf("解压失败：%w", err)
 	}
 	os.Remove(tmp)
-	if _, err := os.Stat(exe); err != nil {
-		return "", fmt.Errorf("解压后未找到解释器：%s", exe)
+	exe := findRuntimePython(runtimeDir, version)
+	if exe == "" {
+		// 列出目录内容，便于诊断异常布局
+		entries, _ := os.ReadDir(runtimeDir)
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		dump := strings.Join(names, ", ")
+		if len(dump) > 300 {
+			dump = dump[:300] + "…"
+		}
+		return "", fmt.Errorf("解压后未找到解释器，%s 目录内容：%s", runtimeDir, dump)
 	}
 	logf("运行时就绪：" + exe + "（保留在 pythons/ 下，可复用）")
 	return exe, nil
@@ -400,8 +433,62 @@ func humanBytes(n int64) string {
 	}
 }
 
-// extractTarGz 解压 python-build-standalone 的 install_only 包（tarball 根为 python/）。
+// tarTopPrefix 扫描 tarball，返回应剥离的顶层目录名（如 "python" 或 "python3.12"）。
+// 顶层目录不唯一或存在根级文件时返回空串（表示不做剥离）。
+func tarTopPrefix(src string) (string, error) {
+	f, err := os.Open(src)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		return "", err
+	}
+	defer gz.Close()
+	tr := tar.NewReader(gz)
+	rootFiles := 0
+	tops := map[string]bool{}
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return "", err
+		}
+		name := strings.TrimPrefix(path.Clean(hdr.Name), "/")
+		if name == "" || name == "." {
+			continue
+		}
+		if i := strings.IndexByte(name, '/'); i >= 0 {
+			tops[name[:i]] = true
+		} else {
+			rootFiles++
+		}
+	}
+	if rootFiles == 0 && len(tops) == 1 {
+		for top := range tops {
+			return top, nil
+		}
+	}
+	return "", nil
+}
+
+// extractTarGz 解压 python-build-standalone 的 install_only 包。
+// tarball 顶层目录并不统一（python/、python3.12/ 等），这里自动探测并剥离唯一顶层目录，
+// 使运行时内容直接位于 destDir 下（Windows: python.exe；Unix: bin/python3）。
 func extractTarGz(src, destDir string, logf func(string)) error {
+	top, err := tarTopPrefix(src)
+	if err != nil {
+		return err
+	}
+	if top != "" {
+		logf("检测到 tarball 顶层目录：" + top + "（自动剥离）")
+	} else {
+		logf("tarball 无统一顶层目录，按原样解压")
+	}
+
 	f, err := os.Open(src)
 	if err != nil {
 		return err
@@ -413,6 +500,10 @@ func extractTarGz(src, destDir string, logf func(string)) error {
 	}
 	defer gz.Close()
 	tr := tar.NewReader(gz)
+	// 符号链接先记录、解压完再统一以复制目标文件代替：
+	// tar 中链接可能排在其目标文件之前，立即复制会因目标不存在而失败。
+	type pendingLink struct{ target, link string }
+	var links []pendingLink
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
@@ -421,48 +512,53 @@ func extractTarGz(src, destDir string, logf func(string)) error {
 		if err != nil {
 			return err
 		}
-		name := path.Clean(hdr.Name)
-		if name == "python" || strings.HasPrefix(name, "python/") {
-			name = strings.TrimPrefix(name, "python/")
-			if name == "" {
-				continue
+		name := strings.TrimPrefix(path.Clean(hdr.Name), "/")
+		if top != "" {
+			name = strings.TrimPrefix(strings.TrimPrefix(name, top), "/")
+		}
+		if name == "" || name == "." {
+			continue
+		}
+		if name == ".." || strings.HasPrefix(name, "../") {
+			continue
+		}
+		target := filepath.Join(destDir, filepath.FromSlash(name))
+		if rel, err := filepath.Rel(destDir, target); err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+			continue
+		}
+		switch hdr.Typeflag {
+		case tar.TypeDir:
+			if err := os.MkdirAll(target, 0o755); err != nil {
+				return err
 			}
-			target := filepath.Join(destDir, filepath.FromSlash(name))
-			if rel, err := filepath.Rel(destDir, target); err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
-				continue
+		case tar.TypeReg:
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				return err
 			}
-			switch hdr.Typeflag {
-			case tar.TypeDir:
-				if err := os.MkdirAll(target, 0o755); err != nil {
-					return err
-				}
-			case tar.TypeReg:
-				if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-					return err
-				}
-				mode := os.FileMode(hdr.Mode) & 0o777
-				if mode == 0 {
-					mode = 0o644
-				}
-				out, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
-				if err != nil {
-					return err
-				}
-				if _, err := io.Copy(out, tr); err != nil {
-					out.Close()
-					return err
-				}
+			mode := os.FileMode(hdr.Mode) & 0o777
+			if mode == 0 {
+				mode = 0o644
+			}
+			out, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+			if err != nil {
+				return err
+			}
+			if _, err := io.Copy(out, tr); err != nil {
 				out.Close()
-			case tar.TypeSymlink, tar.TypeLink:
-				// 以复制目标文件代替链接（兼容 Windows 与无符号链接权限场景）
-				link := hdr.Linkname
-				if link != "" && !filepath.IsAbs(link) {
-					srcPath := filepath.Join(filepath.Dir(target), filepath.FromSlash(link))
-					if b, err := os.ReadFile(srcPath); err == nil {
-						_ = os.WriteFile(target, b, 0o755)
-					}
-				}
+				return err
 			}
+			out.Close()
+		case tar.TypeSymlink, tar.TypeLink:
+			// 记录待补（兼容 Windows 与无符号链接权限场景）
+			if hdr.Linkname != "" && !filepath.IsAbs(hdr.Linkname) {
+				links = append(links, pendingLink{target, hdr.Linkname})
+			}
+		}
+	}
+	for _, l := range links {
+		srcPath := filepath.Join(filepath.Dir(l.target), filepath.FromSlash(l.link))
+		if b, err := os.ReadFile(srcPath); err == nil {
+			_ = os.WriteFile(l.target, b, 0o755)
 		}
 	}
 	return nil
