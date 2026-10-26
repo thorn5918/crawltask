@@ -23,6 +23,7 @@ import (
 	"pyscheduler/internal/runner"
 	"pyscheduler/internal/scheduler"
 	"pyscheduler/internal/store"
+	"pyscheduler/internal/workflow"
 )
 
 //go:embed static
@@ -53,9 +54,12 @@ func main() {
 	sch := scheduler.New(st, rn)
 	sch.Start() // 服务重启后自动恢复「活跃中」任务的调度
 
+	wfe := workflow.New(st, rn)
+	wfe.Start() // 恢复流程编排的定时调度
+
 	envm := envs.New(st)
 	projm := projects.New(st)
-	apiSrv := api.New(st, sch, rn, envm, projm)
+	apiSrv := api.New(st, sch, rn, envm, projm, wfe)
 
 	mux := http.NewServeMux()
 	mux.Handle("/api/", apiSrv.Routes())
@@ -98,6 +102,7 @@ func main() {
 	_ = srv.Shutdown(ctx)
 
 	sch.Stop()                 // 停止新调度
+	wfe.Stop()                 // 停止流程调度并终止运行中的流程实例
 	rn.WaitAll(15 * time.Second) // 等待运行中的任务结束（超时后强制终止）
 	log.Println("已退出")
 }

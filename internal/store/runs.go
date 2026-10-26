@@ -142,7 +142,8 @@ func (s *Store) ListRuns(f RunFilter) ([]*Run, int, error) {
 
 // LastRunPerTask 每个任务最近一次运行（含 running）。
 func (s *Store) LastRunPerTask() (map[int64]*Run, error) {
-	rows, err := s.db.Query(`SELECT ` + runCols + ` FROM runs r
+	rows, err := s.db.Query(`SELECT r.id, r.task_id, r.task_name, r.status, r.trigger,
+		r.start_time, r.end_time, r.duration_ms, r.exit_code, r.log_file FROM runs r
 		JOIN (SELECT task_id, MAX(id) AS mid FROM runs GROUP BY task_id) m ON r.id = m.mid`)
 	if err != nil {
 		return nil, err

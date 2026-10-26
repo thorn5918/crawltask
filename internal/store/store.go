@@ -4,6 +4,7 @@ package store
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -85,10 +86,39 @@ func (s *Store) migrate() error {
 			key TEXT PRIMARY KEY,
 			value TEXT NOT NULL DEFAULT ''
 		)`,
+		`CREATE TABLE IF NOT EXISTS workflows (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			name TEXT NOT NULL,
+			description TEXT NOT NULL DEFAULT '',
+			cron_expr TEXT NOT NULL DEFAULT '',
+			enabled INTEGER NOT NULL DEFAULT 0,
+			steps TEXT NOT NULL DEFAULT '[]',
+			last_fire TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL DEFAULT '',
+			updated_at TEXT NOT NULL DEFAULT ''
+		)`,
+		`CREATE TABLE IF NOT EXISTS workflow_runs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			workflow_id INTEGER NOT NULL,
+			workflow_name TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'running',
+			trigger TEXT NOT NULL DEFAULT 'manual',
+			start_time TEXT NOT NULL DEFAULT '',
+			end_time TEXT NOT NULL DEFAULT '',
+			duration_ms INTEGER NOT NULL DEFAULT 0,
+			steps TEXT NOT NULL DEFAULT '[]'
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_workflow_runs_wf ON workflow_runs(workflow_id, id DESC)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.Exec(stmt); err != nil {
 			return fmt.Errorf("migrate: %w", err)
+		}
+	}
+	// tasks 增加 workflow_id 列（流程编排内部任务标记，>0 表示属于某流程，不在任务管理中显示）
+	if _, err := s.db.Exec(`ALTER TABLE tasks ADD COLUMN workflow_id INTEGER NOT NULL DEFAULT 0`); err != nil {
+		if !strings.Contains(err.Error(), "duplicate column") {
+			return fmt.Errorf("migrate tasks.workflow_id: %w", err)
 		}
 	}
 	return nil

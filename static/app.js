@@ -100,7 +100,7 @@ function envStatusBadge(s) {
   const m = ENV_STATUS[s] || ['gray', s || '-'];
   return `<span class="badge ${m[0]}">${esc(m[1])}</span>`;
 }
-function triggerText(t) { return t === 'schedule' ? '调度' : '手动'; }
+function triggerText(t) { return t === 'schedule' ? '调度' : t === 'workflow' ? '流程' : '手动'; }
 
 function debounce(fn, ms) {
   let h;
@@ -112,6 +112,7 @@ function debounce(fn, ms) {
 const PAGES = {
   dashboard: { title: '仪表盘', render: renderDashboard },
   tasks: { title: '任务管理', render: renderTasks },
+  workflows: { title: '流程编排', render: renderWorkflows },
   projects: { title: '项目管理', render: renderProjects },
   envs: { title: '环境管理', render: renderEnvs },
   logs: { title: '运行日志', render: renderLogs },
@@ -612,6 +613,400 @@ function showRunLog(runId) {
   $('#rl-kw', m.el).onkeydown = e => { if (e.key === 'Enter') render(); };
   $('#rl-scroll', m.el).onchange = render;
   poll();
+}
+
+/* ================= 流程编排 ================= */
+
+const WF_STATUS_TEXT = { running: '运行中', success: '成功', partial: '部分成功', failed: '失败', killed: '已终止' };
+const WF_STATUS_CLS = { running: 'running', success: 'success', partial: 'killed', failed: 'failed', killed: 'killed' };
+function wfStatusBadge(s) {
+  const cls = WF_STATUS_CLS[s] || 'gray';
+  return `<span class="badge ${cls}">${esc(WF_STATUS_TEXT[s] || s || '-')}</span>`;
+}
+const WF_STEP_STATUS_TEXT = { pending: '等待中', running: '运行中', success: '成功', failed: '失败', killed: '已终止', skipped: '已跳过' };
+const WF_STEP_STATUS_CLS = { pending: 'gray', running: 'running', success: 'success', failed: 'failed', killed: 'killed', skipped: 'gray' };
+function wfStepBadge(s) {
+  const cls = WF_STEP_STATUS_CLS[s] || 'gray';
+  return `<span class="badge ${cls}">${esc(WF_STEP_STATUS_TEXT[s] || s || '-')}</span>`;
+}
+
+async function renderWorkflows(root) {
+  root.innerHTML = `
+    <div class="card">
+      <div class="toolbar">
+        <span class="muted">分步骤指定命令 / 项目 / 虚拟环境，按顺序依次执行；启用定时后按 Cron 触发整个流程。</span>
+        <span class="spacer"></span>
+        <button class="btn primary" id="btn-new-wf">+ 新建流程</button>
+      </div>
+      <div style="overflow-x:auto">
+        <table class="tbl">
+          <thead><tr>
+            <th style="min-width:180px">流程</th><th style="min-width:240px">执行步骤</th>
+            <th style="min-width:110px">定时调度</th><th>状态</th><th>最近运行</th><th style="width:225px">操作</th>
+          </tr></thead>
+          <tbody id="wf-tbody"><tr><td colspan="6" class="tbl-empty">加载中…</td></tr></tbody>
+        </table>
+      </div>
+    </div>`;
+
+  let all = [];
+
+  async function load() {
+    try {
+      const d = await api('GET', '/api/workflows');
+      all = d.workflows || [];
+      renderRows();
+    } catch (e) {
+      $('#wf-tbody', root).innerHTML = `<tr><td colspan="6" class="tbl-empty">加载失败：${esc(e.message)}</td></tr>`;
+    }
+  }
+
+  function renderRows() {
+    if (!all.length) {
+      $('#wf-tbody', root).innerHTML = '<tr><td colspan="6" class="tbl-empty">暂无流程，点击右上角新建</td></tr>';
+      return;
+    }
+    $('#wf-tbody', root).innerHTML = all.map(wf => {
+      const chain = (wf.steps_view || []).map(s => {
+        const envTip = s.env_name ? `（${s.env_name}）` : '';
+        const name = s.missing
+          ? `<span style="color:var(--danger)" title="步骤数据缺失">${esc(s.task_name || '#' + s.task_id)}（缺失）</span>`
+          : `<span title="${esc('命令：' + (s.command || '-'))}">${esc(s.task_name)}<span class="muted">${esc(envTip)}</span></span>`;
+        const cont = s.continue_on_failure ? ' <span class="muted" title="失败后继续执行后续步骤">⟳</span>' : '';
+        return name + cont;
+      }).join(' <span class="wf-chain-arrow">→</span> ');
+      const last = wf.last_status
+        ? `${wfStatusBadge(wf.last_status)}<div class="muted">${esc(wf.last_end_time || '')} · ${fmtDur(wf.last_duration_ms)}</div>`
+        : '<span class="muted">从未运行</span>';
+      const cronOk = wf.cron_expr && wf.schedule_desc !== '未启用定时';
+      return `<tr>
+        <td><b>${esc(wf.name)}</b>${wf.description ? `<div class="muted">${esc(wf.description)}</div>` : ''}</td>
+        <td>${chain || '<span class="muted">无步骤</span>'}</td>
+        <td><div>${esc(wf.schedule_desc)}</div><div class="muted">${wf.last_fire ? '上次触发 ' + esc(wf.last_fire) : ''}</div></td>
+        <td>
+          <label class="switch"><input type="checkbox" data-toggle="${wf.id}" ${wf.enabled ? 'checked' : ''} ${cronOk ? '' : 'title="未配置 Cron，无法启用"'}></label>
+          <div class="mt8">${wf.running ? '<span class="badge running">运行中</span>' : wfStatusBadge(wf.last_status)}</div>
+        </td>
+        <td>${last}</td>
+        <td><div class="actions">
+          <button class="btn sm" data-run="${wf.id}" ${wf.running ? 'disabled' : ''}>运行</button>
+          <button class="btn sm" data-kill="${wf.id}" ${wf.running ? '' : 'disabled'}>终止</button>
+          <button class="btn sm" data-hist="${wf.id}">记录</button>
+          <button class="btn sm" data-edit="${wf.id}">编辑</button>
+          <button class="btn sm danger" data-del="${wf.id}">删除</button>
+        </div></td>
+      </tr>`;
+    }).join('');
+
+    $$('#wf-tbody [data-run]', root).forEach(b => b.onclick = async () => {
+      try {
+        await api('POST', `/api/workflows/${b.dataset.run}/run`);
+        toast('流程已开始执行', 'success');
+        openWorkflowRunLogFresh(b.dataset.run);
+      } catch (e) { toast(e.message, 'error'); }
+      load();
+    });
+    $$('#wf-tbody [data-kill]', root).forEach(b => b.onclick = async () => {
+      if (!await confirmDialog('确定终止该流程？正在执行的步骤进程将被强制结束，剩余步骤跳过。', '终止流程')) return;
+      try {
+        await api('POST', `/api/workflows/${b.dataset.kill}/kill`);
+        toast('已终止', 'success');
+      } catch (e) { toast(e.message, 'error'); }
+      load();
+    });
+    $$('#wf-tbody [data-hist]', root).forEach(b => b.onclick = () => {
+      const wf = all.find(x => x.id === +b.dataset.hist);
+      openWorkflowHistory(wf);
+    });
+    $$('#wf-tbody [data-edit]', root).forEach(b => b.onclick = () => {
+      const wf = all.find(x => x.id === +b.dataset.edit);
+      openWorkflowDialog(wf, load);
+    });
+    $$('#wf-tbody [data-del]', root).forEach(b => b.onclick = async () => {
+      if (!await confirmDialog('删除流程将停止其定时调度并终止运行中的实例（保留运行记录），确定？', '删除流程')) return;
+      try {
+        await api('DELETE', `/api/workflows/${b.dataset.del}`);
+        toast('已删除', 'success');
+      } catch (e) { toast(e.message, 'error'); }
+      load();
+    });
+    $$('#wf-tbody [data-toggle]', root).forEach(cb => cb.onchange = async () => {
+      const id = cb.dataset.toggle;
+      const act = cb.checked ? 'resume' : 'pause';
+      try {
+        await api('POST', `/api/workflows/${id}/${act}`);
+        toast(act === 'pause' ? '已停用定时' : '已启用定时', 'success');
+      } catch (e) { toast(e.message, 'error'); cb.checked = !cb.checked; }
+      load();
+    });
+  }
+
+  // 触发运行后自动打开最新实例的日志追踪
+  function openWorkflowRunLogFresh(wfId) {
+    const timer = setInterval(async () => {
+      try {
+        const d = await api('GET', `/api/workflows/${wfId}/runs?page=1&page_size=1`);
+        if ((d.items || []).length) {
+          clearInterval(timer);
+          openWorkflowRunDetail(d.items[0]);
+        }
+      } catch (e) { clearInterval(timer); }
+    }, 800);
+    setTimeout(() => clearInterval(timer), 8000);
+  }
+
+  $('#btn-new-wf', root).onclick = () => openWorkflowDialog(null, load);
+
+  await load();
+  const t = setInterval(load, 5000);
+  pageCleanup = () => clearInterval(t);
+}
+
+/* ---- 流程编辑对话框（步骤内联定义：命令 / 项目 / 虚拟环境） ---- */
+
+async function openWorkflowDialog(wf, onSaved) {
+  const [envsRes, projsRes] = await Promise.all([
+    api('GET', '/api/envs').catch(() => ({ envs: [] })),
+    api('GET', '/api/projects').catch(() => ({ projects: [] })),
+  ]);
+  const envs = (envsRes.envs || []).filter(e => e.status === 'ready');
+  const projects = projsRes.projects || [];
+
+  const w = wf || { name: '', description: '', cron_expr: '0 8 * * *', enabled: false, steps_view: [] };
+  let steps = (w.steps_view || []).map(s => ({
+    task_id: s.task_id || 0,
+    name: s.task_name || '',
+    command: s.command || '',
+    project: s.project || '',
+    workdir: s.workdir || '',
+    env_id: s.env_id || 0,
+    continue_on_failure: !!s.continue_on_failure,
+  }));
+  if (!steps.length) steps = [newStep()];
+
+  function newStep() {
+    return { task_id: 0, name: '', command: '', project: '', workdir: '', env_id: 0, continue_on_failure: false };
+  }
+
+  const m = openModal({
+    title: wf ? '编辑流程' : '新建流程',
+    wide: true,
+    body: `
+      <div class="form-row">
+        <div class="form-item" style="flex:2"><label class="req">流程名称</label>
+          <input type="text" id="wf-name" value="${esc(w.name)}" placeholder="如：每日数据采集链"></div>
+        <div class="form-item"><label>流程描述</label>
+          <input type="text" id="wf-desc" value="${esc(w.description)}" placeholder="选填"></div>
+      </div>
+      <div class="form-item"><label class="req">执行步骤（按顺序依次执行，每步指定命令 / 项目 / 虚拟环境）</label>
+        <div id="wf-steps"></div>
+        <button class="btn sm" id="wf-add-step">+ 添加步骤</button>
+      </div>
+      <div class="form-item"><label>定时调度</label>
+        <label class="switch"><input type="checkbox" id="wf-enabled" ${w.enabled ? 'checked' : ''}> 按 Cron 定时触发整个流程</label>
+      </div>
+      <div class="form-item" id="wf-cron-box">
+        <div class="form-row">
+          <div class="form-item" style="flex:2"><label>Cron 表达式（分 时 日 月 周）</label>
+            <input type="text" id="wf-cron" class="mono" style="font-family:var(--mono)" value="${esc(w.cron_expr)}" placeholder="0 8 * * *"></div>
+          <div class="form-item"><label>常用预设</label>
+            <select id="wf-cron-preset"><option value="">选择…</option>
+              ${CRON_PRESETS.map(([n, v]) => `<option value="${v}">${n}（${v}）</option>`).join('')}
+            </select></div>
+        </div>
+        <div class="form-hint">步骤按顺序执行，单步骤流程相当于一个不定时的任务；上一实例未结束时自动跳过本次触发。</div>
+      </div>
+    `,
+  });
+
+  const stepsBox = $('#wf-steps', m.el);
+
+  function renderSteps() {
+    stepsBox.innerHTML = steps.map((s, i) => `
+      <div class="wf-step-card" data-i="${i}">
+        <div class="wf-step-head">
+          <span class="wf-step-idx">${i + 1}</span>
+          <input type="text" data-role="name" value="${esc(s.name)}" placeholder="步骤名称（如：拉取数据）" style="flex:1">
+          <label class="switch wf-step-cont" title="该步骤失败后是否继续执行后续步骤"><input type="checkbox" data-role="cont" ${s.continue_on_failure ? 'checked' : ''}>失败继续</label>
+          <span class="wf-step-ops">
+            <button class="btn sm" data-role="up" ${i === 0 ? 'disabled' : ''} title="上移">↑</button>
+            <button class="btn sm" data-role="down" ${i === steps.length - 1 ? 'disabled' : ''} title="下移">↓</button>
+            <button class="btn sm danger" data-role="del" title="移除">✕</button>
+          </span>
+        </div>
+        <div class="wf-step-body">
+          <div class="form-item" style="margin-bottom:10px"><label class="req">命令（任意命令行，如 python spider.py --date today）</label>
+            <textarea data-role="command" rows="2" class="mono" style="font-family:var(--mono)" placeholder="python main.py">${esc(s.command)}</textarea></div>
+          <div class="form-row">
+            <div class="form-item"><label>所属项目</label>
+              <select data-role="project"><option value="">（无项目）</option>
+                ${projects.map(p => `<option value="${esc(p.name)}" ${s.project === p.name ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}
+              </select></div>
+            <div class="form-item"><label>工作路径（相对项目根）</label>
+              <input type="text" data-role="workdir" value="${esc(s.workdir)}" placeholder="如 sub 或留空"></div>
+            <div class="form-item"><label>虚拟环境</label>
+              <select data-role="env"><option value="0">（不指定 · 用系统 PATH）</option>
+                ${envs.map(e => `<option value="${e.id}" ${s.env_id === e.id ? 'selected' : ''}>${esc(e.name)}（${esc(e.python_version)}）</option>`).join('')}
+              </select></div>
+          </div>
+        </div>
+      </div>
+      ${i < steps.length - 1 ? '<div class="wf-step-arrow">↓</div>' : ''}`).join('');
+
+    $$('.wf-step-card', stepsBox).forEach(card => {
+      const i = +card.dataset.i;
+      const on = (role, ev, fn) => { const el = card.querySelector(`[data-role=${role}]`); el.addEventListener(ev, () => fn(el)); };
+      on('name', 'input', el => { steps[i].name = el.value; });
+      on('command', 'input', el => { steps[i].command = el.value; });
+      on('project', 'change', el => { steps[i].project = el.value; });
+      on('workdir', 'input', el => { steps[i].workdir = el.value; });
+      on('env', 'change', el => { steps[i].env_id = +el.value; });
+      on('cont', 'change', el => { steps[i].continue_on_failure = el.checked; });
+      card.querySelector('[data-role=up]').onclick = () => { if (i > 0) { [steps[i - 1], steps[i]] = [steps[i], steps[i - 1]]; renderSteps(); } };
+      card.querySelector('[data-role=down]').onclick = () => { if (i < steps.length - 1) { [steps[i + 1], steps[i]] = [steps[i], steps[i + 1]]; renderSteps(); } };
+      card.querySelector('[data-role=del]').onclick = () => {
+        if (steps.length === 1) { toast('流程至少保留一个步骤', 'warning'); return; }
+        steps.splice(i, 1); renderSteps();
+      };
+    });
+  }
+  renderSteps();
+
+  $('#wf-add-step', m.el).onclick = () => { steps.push(newStep()); renderSteps(); };
+  $('#wf-cron-preset', m.el).onchange = () => {
+    if ($('#wf-cron-preset', m.el).value) $('#wf-cron', m.el).value = $('#wf-cron-preset', m.el).value;
+  };
+  function syncCronBox() { $('#wf-cron-box', m.el).style.display = $('#wf-enabled', m.el).checked ? '' : 'none'; }
+  $('#wf-enabled', m.el).onchange = syncCronBox;
+  syncCronBox();
+
+  const cancel = document.createElement('button');
+  cancel.className = 'btn'; cancel.textContent = '取消';
+  const ok = document.createElement('button');
+  ok.className = 'btn primary'; ok.textContent = wf ? '保存' : '创建';
+  cancel.onclick = m.close;
+  ok.onclick = async () => {
+    const body = {
+      name: $('#wf-name', m.el).value,
+      description: $('#wf-desc', m.el).value,
+      cron_expr: $('#wf-cron', m.el).value.trim(),
+      enabled: $('#wf-enabled', m.el).checked,
+      steps: steps.map(s => ({
+        task_id: s.task_id, name: s.name, command: s.command,
+        project: s.project, workdir: s.workdir, env_id: s.env_id,
+        continue_on_failure: s.continue_on_failure,
+      })),
+    };
+    if (body.steps.some(s => !s.command.trim())) { toast('存在未填写命令的步骤', 'warning'); return; }
+    try {
+      if (wf) await api('PUT', `/api/workflows/${wf.id}`, body);
+      else await api('POST', '/api/workflows', body);
+      toast(wf ? '已保存' : '流程已创建', 'success');
+      m.close();
+      if (onSaved) onSaved();
+    } catch (e) { toast(e.message, 'error'); }
+  };
+  m.footer.append(cancel, ok);
+}
+
+/* ---- 流程运行记录 ---- */
+
+async function openWorkflowHistory(wf) {
+  const m = openModal({
+    title: `运行记录 · ${wf.name}`, wide: true,
+    onClose() { clearInterval(timer); },
+    body: `
+      <table class="tbl">
+        <thead><tr><th>编号</th><th>状态</th><th>触发</th><th>开始时间</th><th>耗时</th><th></th></tr></thead>
+        <tbody id="wfh-body"><tr><td colspan="6" class="tbl-empty">加载中…</td></tr></tbody>
+      </table>
+      <div class="pager"><span id="wfh-total"></span><button class="btn sm" id="wfh-more">加载更多</button></div>
+    `});
+  let page = 1, total = 0;
+  async function loadPage() {
+    try {
+      const d = await api('GET', `/api/workflows/${wf.id}/runs?page=${page}&page_size=15`);
+      total = d.total;
+      $('#wfh-total', m.el).textContent = `共 ${total} 条`;
+      if (page === 1) $('#wfh-body', m.el).innerHTML = '';
+      (d.items || []).forEach(r => {
+        const tr = document.createElement('tr');
+        tr.style.cursor = 'pointer';
+        tr.innerHTML = `
+          <td>#${r.id}</td><td>${wfStatusBadge(r.status)}</td><td>${triggerText(r.trigger)}</td>
+          <td class="nowrap">${esc(r.start_time)}</td><td>${fmtDur(r.duration_ms)}</td>
+          <td><button class="btn sm">详情</button> <button class="btn sm danger" data-del="${r.id}" ${r.status === 'running' ? 'disabled' : ''}>删除</button></td>`;
+        tr.onclick = () => openWorkflowRunDetail(r);
+        tr.querySelector('[data-del]').onclick = async (ev) => {
+          ev.stopPropagation();
+          if (!await confirmDialog(`确认删除流程运行 #${r.id} 的记录？（不含任务自身日志）`, '删除记录')) return;
+          try {
+            await api('DELETE', `/api/workflow-runs/${r.id}`);
+            toast('已删除', 'success');
+            tr.remove();
+            total--;
+            $('#wfh-total', m.el).textContent = `共 ${total} 条`;
+          } catch (e) { toast(e.message, 'error'); }
+        };
+        $('#wfh-body', m.el).appendChild(tr);
+      });
+      if (page === 1 && !((d.items || []).length)) $('#wfh-body', m.el).innerHTML = '<tr><td colspan="6" class="tbl-empty">暂无记录</td></tr>';
+      page++;
+      if ((page - 1) * 15 >= total) $('#wfh-more', m.el).style.display = 'none';
+    } catch (e) { toast(e.message, 'error'); }
+  }
+  $('#wfh-more', m.el).onclick = loadPage;
+  loadPage();
+  const timer = setInterval(async () => {
+    try {
+      const d = await api('GET', `/api/workflows/${wf.id}/runs?page=1&page_size=1`);
+      if ((d.items || []).some(r => r.status === 'running')) { page = 1; loadPage(); }
+    } catch (e) { /* ignore */ }
+  }, 4000);
+}
+
+/* ---- 流程运行实例详情（步骤流转图） ---- */
+
+function openWorkflowRunDetail(run) {
+  const m = openModal({
+    title: `流程运行详情 · #${run.id}`,
+    wide: true,
+    footer: null,
+    onClose() { clearInterval(timer); },
+    body: `
+      <div class="log-meta" id="wfr-meta"></div>
+      <div id="wfr-steps"></div>`,
+  });
+
+  function render() {
+    const steps = typeof run.steps === 'string' ? JSON.parse(run.steps || '[]') : (run.steps || []);
+    $('#wfr-meta', m.el).innerHTML = `
+      <span>流程：<b>${esc(run.workflow_name)}</b></span><span>状态：<b>${wfStatusBadge(run.status)}</b></span>
+      <span>触发：<b>${triggerText(run.trigger)}</b></span><span>开始：<b>${esc(run.start_time)}</b></span>
+      <span>耗时：<b>${fmtDur(run.duration_ms)}</b></span>`;
+    $('#wfr-steps', m.el).innerHTML = steps.map((s, i) => `
+      <div class="wf-flow-node">
+        <span class="wf-step-idx">${i + 1}</span>
+        <div style="flex:1;min-width:0">
+          <div><b>${esc(s.task_name || '#' + s.task_id)}</b> ${wfStepBadge(s.status)}
+            ${s.continue_on_failure ? '<span class="tag gray">失败继续</span>' : ''}</div>
+          <div class="muted">${s.run_id ? '运行 #' + s.run_id + ' · ' : ''}${esc(s.start_time || '')}${s.end_time ? ' → ' + esc(s.end_time) : ''}${s.duration_ms ? ' · ' + fmtDur(s.duration_ms) : ''}${s.error ? ' · <span style="color:var(--danger)">' + esc(s.error) + '</span>' : ''}</div>
+        </div>
+        ${s.run_id ? `<button class="btn sm" data-log="${s.run_id}">日志</button>` : ''}
+      </div>
+      ${i < steps.length - 1 ? '<div class="wf-step-arrow">↓</div>' : ''}`).join('') || '<div class="tbl-empty">无步骤</div>';
+    $$('#wfr-steps [data-log]', m.el).forEach(b => b.onclick = () => showRunLog(+b.dataset.log));
+  }
+
+  render();
+  const timer = setInterval(async () => {
+    if (run.status !== 'running') { clearInterval(timer); return; }
+    try {
+      const d = await api('GET', `/api/workflow-runs/${run.id}`);
+      run = d.run;
+      render();
+    } catch (e) { clearInterval(timer); }
+  }, 1500);
 }
 
 /* ================= 项目管理 ================= */

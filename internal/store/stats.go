@@ -47,7 +47,7 @@ type OverviewTasks struct {
 // DashboardStats 汇总仪表盘统计。
 func (s *Store) DashboardStats() (OverviewTasks, error) {
 	var o OverviewTasks
-	if err := s.db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(enabled),0) FROM tasks`).Scan(&o.Total, &o.Active); err != nil {
+	if err := s.db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(enabled),0) FROM tasks WHERE workflow_id=0`).Scan(&o.Total, &o.Active); err != nil {
 		return o, err
 	}
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM runs WHERE status='running'`).Scan(&o.Running); err != nil {

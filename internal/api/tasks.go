@@ -132,7 +132,7 @@ func (s *Server) buildViews(tasks []*store.Task) []*taskView {
 }
 
 func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
-	tasks, err := s.st.ListTasks()
+	tasks, err := s.st.ListUserTasks()
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return

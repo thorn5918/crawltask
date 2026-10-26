@@ -12,6 +12,7 @@ import (
 	"pyscheduler/internal/runner"
 	"pyscheduler/internal/scheduler"
 	"pyscheduler/internal/store"
+	"pyscheduler/internal/workflow"
 )
 
 // Server 聚合全部依赖。
@@ -21,11 +22,12 @@ type Server struct {
 	rn    *runner.Runner
 	envm  *envs.Manager
 	projm *projects.Manager
+	wf    *workflow.Engine
 }
 
 // New 创建 API 服务。
-func New(st *store.Store, sch *scheduler.Scheduler, rn *runner.Runner, envm *envs.Manager, projm *projects.Manager) *Server {
-	return &Server{st: st, sch: sch, rn: rn, envm: envm, projm: projm}
+func New(st *store.Store, sch *scheduler.Scheduler, rn *runner.Runner, envm *envs.Manager, projm *projects.Manager, wf *workflow.Engine) *Server {
+	return &Server{st: st, sch: sch, rn: rn, envm: envm, projm: projm, wf: wf}
 }
 
 // Routes 注册全部 API 路由（Go 1.22 方法+路径模式）。
@@ -76,6 +78,19 @@ func (s *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("GET /api/projects/{name}/file", s.readFile)
 	mux.HandleFunc("PUT /api/projects/{name}/file", s.writeFile)
 	mux.HandleFunc("DELETE /api/projects/{name}/file", s.deletePath)
+
+	// 流程编排
+	mux.HandleFunc("GET /api/workflows", s.listWorkflows)
+	mux.HandleFunc("POST /api/workflows", s.createWorkflow)
+	mux.HandleFunc("PUT /api/workflows/{id}", s.updateWorkflow)
+	mux.HandleFunc("DELETE /api/workflows/{id}", s.deleteWorkflow)
+	mux.HandleFunc("POST /api/workflows/{id}/run", s.runWorkflow)
+	mux.HandleFunc("POST /api/workflows/{id}/pause", s.pauseWorkflow)
+	mux.HandleFunc("POST /api/workflows/{id}/resume", s.resumeWorkflow)
+	mux.HandleFunc("POST /api/workflows/{id}/kill", s.killWorkflow)
+	mux.HandleFunc("GET /api/workflows/{id}/runs", s.workflowRuns)
+	mux.HandleFunc("GET /api/workflow-runs/{id}", s.getWorkflowRun)
+	mux.HandleFunc("DELETE /api/workflow-runs/{id}", s.deleteWorkflowRun)
 
 	// 仪表盘
 	mux.HandleFunc("GET /api/dashboard/overview", s.overview)
